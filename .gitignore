@@ -1,0 +1,65 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Data files
+*.csv
+cb_data/
+all_cryptos_merged.csv
+volume_leaderboard.csv
+ranked_opportunities.csv
+crypto_signals.csv
+
+# Signal tracking/history files
+signal_history.json
+signal_performance_history.json
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environment variables
+.env
+.env.local
+
+# Local configuration
+config.ini
+config.json
+settings.json
+
+# Operating system files
+Thumbs.db
+.DS_Store 

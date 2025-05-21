@@ -783,38 +783,43 @@ def rank_opportunities(signals_df, min_score=60, min_volume_usd=50000):
     logger.info(f"Coins passing volume filter (${min_volume_usd}+): {volume_filter.sum()}")
     logger.info(f"Coins passing all filters: {(score_filter & volume_filter & peak_filter).sum()}")
     
-    # IMPORTANT: If no coins pass all filters, reduce the thresholds to ensure we get some recommendations
-    if (score_filter & volume_filter & peak_filter).sum() == 0:
-        logger.warning("No coins passed all filters. Reducing thresholds to ensure recommendations.")
-        
-        # First try lowering just the score threshold
-        min_score_adjusted = 40
-        score_filter = latest_data['combined_score'] >= min_score_adjusted
-        
-        if (score_filter & volume_filter & peak_filter).sum() == 0:
-            # If still no results, lower volume threshold too
-            min_volume_usd_adjusted = 10000
-            volume_filter = latest_data['usd_vol5m'] >= min_volume_usd_adjusted
-            logger.warning(f"Adjusted thresholds: min_score={min_score_adjusted}, min_volume_usd={min_volume_usd_adjusted}")
-        else:
-            logger.warning(f"Adjusted threshold: min_score={min_score_adjusted}")
-            
-        logger.info(f"After adjustment - Coins passing filters: {(score_filter & volume_filter & peak_filter).sum()}")
+    # IMPORTANT: First try our best filtering
+    filtered_data = latest_data[score_filter & volume_filter & peak_filter].copy()
     
-    # Apply filters - INCLUDE peak filter
-    opportunities = latest_data[score_filter & volume_filter & peak_filter].copy()
-    
-    # If STILL no opportunities, relax the peak filter but keep a bonus for non-peak coins
-    if opportunities.empty:
-        logger.warning("Still no opportunities after threshold adjustment. Taking top coins but favoring those not at peak.")
+    # If we have at least 5 opportunities with optimal filtering, use those
+    if len(filtered_data) >= 5:
+        logger.info("Found sufficient opportunities with optimal filtering")
+        opportunities = filtered_data
+    else:
+        # Try with relaxed score threshold
+        logger.info("Optimal filtering produced fewer than 5 results, relaxing score filter")
+        relaxed_score_filter = latest_data['combined_score'] >= 40  # Relaxed score threshold
+        relaxed_filtered_data = latest_data[relaxed_score_filter & volume_filter & peak_filter].copy()
         
-        # Create a weighted score that penalizes coins near their peak
-        if 'high_proximity' in latest_data.columns:
-            latest_data['weighted_score'] = latest_data['combined_score'] * (1.5 - latest_data['high_proximity'])
+        if len(relaxed_filtered_data) >= 5:
+            logger.info("Found sufficient opportunities with relaxed score filtering")
+            opportunities = relaxed_filtered_data
         else:
-            latest_data['weighted_score'] = latest_data['combined_score']
+            # Try with relaxed volume threshold
+            logger.info("Relaxed score filtering produced fewer than 5 results, relaxing volume filter")
+            relaxed_volume_filter = latest_data['usd_vol5m'] >= 10000  # Relaxed volume threshold
+            more_relaxed_data = latest_data[relaxed_score_filter & relaxed_volume_filter & peak_filter].copy()
             
-        opportunities = latest_data.nlargest(5, 'weighted_score').copy()
+            if len(more_relaxed_data) >= 5:
+                logger.info("Found sufficient opportunities with relaxed score and volume filtering")
+                opportunities = more_relaxed_data
+            else:
+                # Try with just the peak filter
+                logger.info("Relaxed filtering still produced fewer than 5 results, using only peak filter")
+                peak_filtered_data = latest_data[peak_filter].copy()
+                
+                if len(peak_filtered_data) >= 5:
+                    logger.info("Found sufficient opportunities with peak filter only")
+                    opportunities = peak_filtered_data
+                else:
+                    # As a last resort, just take all data
+                    logger.info("Using all available data to get top 5 opportunities")
+                    opportunities = latest_data.copy()
     
     # Create a total opportunity score that considers both signal strength and liquidity
     opportunities['liquidity_factor'] = np.tanh(opportunities['usd_vol5m'] / 1000000)
@@ -827,8 +832,8 @@ def rank_opportunities(signals_df, min_score=60, min_volume_usd=50000):
     else:
         opportunities['opportunity_score'] = opportunities['combined_score'] * (0.7 + 0.3 * opportunities['liquidity_factor'])
     
-    # Rank opportunities
-    ranked = opportunities.sort_values('opportunity_score', ascending=False).reset_index(drop=True)
+    # Rank opportunities and ensure we get at least top 5
+    ranked = opportunities.nlargest(min(len(opportunities), 5), 'opportunity_score').reset_index(drop=True)
     
     # Add rank column
     ranked['rank'] = ranked.index + 1

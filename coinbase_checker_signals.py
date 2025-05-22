@@ -26,7 +26,7 @@ logger.addHandler(console_handler)
 # Constants
 API_URL = "https://api.exchange.coinbase.com"
 DATA_DIR = "cb_data"
-VOLUME_LEADERBOARD = "volume_leaderboard.csv"
+VOLUME_LEADERBOARD = "sig_data/volume_leaderboard.csv"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 VOLUME_24HOUR_THRESHOLD = 500000
@@ -202,14 +202,38 @@ def merge_active_data():
     all_data["pct_change"] = all_data.groupby("symbol")["ticker_price"].pct_change()
     all_data = all_data.copy()
     all_data["pct_change"] = all_data["pct_change"].fillna(0.0)
-    active_data = all_data[all_data['usd_vol24h'] >= VOLUME_24HOUR_THRESHOLD].copy()
+    
+    # Ensure datetime format for ticker_time
+    all_data['ticker_time'] = pd.to_datetime(all_data['ticker_time'], format='mixed', errors='coerce')
+    
+    # Filter out symbols without recent data (last 10 minutes)
+    recent_cutoff = datetime.utcnow() - timedelta(minutes=10)
+    logger.info(f"Filtering out symbols without data since {recent_cutoff.isoformat()}")
+    
+    # Get most recent data point for each symbol
+    latest_data = all_data.sort_values('ticker_time').groupby('symbol').tail(1)
+    
+    # Find symbols with recent data
+    fresh_symbols = latest_data[latest_data['ticker_time'] >= recent_cutoff]['symbol'].unique()
+    logger.info(f"Found {len(fresh_symbols)} symbols with data in the last 10 minutes")
+    
+    # Filter all_data to only include fresh symbols
+    fresh_data = all_data[all_data['symbol'].isin(fresh_symbols)].copy()
+    logger.info(f"Filtered from {len(all_data)} to {len(fresh_data)} rows by recency")
+    
+    # Now apply the volume threshold filter
+    active_data = fresh_data[fresh_data['usd_vol24h'] >= VOLUME_24HOUR_THRESHOLD].copy()
+    logger.info(f"Further filtered to {len(active_data)} rows by volume threshold")
+    
+    # Apply the 48-hour cutoff and minimum data point requirements
     cutoff = datetime.utcnow() - timedelta(hours=48)
-    active_data['ticker_time'] = pd.to_datetime(active_data['ticker_time'], format='mixed', errors='coerce')
     recent = active_data[active_data['ticker_time'] >= cutoff]
     good_symbols = recent['symbol'].value_counts()[lambda s: s >= 20].index
     active_data = recent[recent['symbol'].isin(good_symbols)].copy()
+    logger.info(f"Final dataset contains {len(active_data)} rows across {len(good_symbols)} symbols")
+    
     active_data.sort_values(['symbol', 'ticker_time'], inplace=True)
-    active_data.to_csv(os.path.join("all_cryptos_merged.csv"), index=False)
+    active_data.to_csv(os.path.join("sig_data/all_cryptos_merged.csv"), index=False)
     return active_data
 
 def run_checker():

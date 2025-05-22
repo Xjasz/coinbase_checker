@@ -17,9 +17,14 @@ logger.addHandler(file_handler)
 DEFAULT_STOP_LOSS_PCT = 0.02  # 2% stop loss by default
 MIN_TAKE_PROFIT_PCT = 0.03    # 3% minimum take profit
 DEFAULT_TAKE_PROFIT_PCT = 0.05  # 5% take profit by default
-PERFORMANCE_HISTORY_FILE = "signal_performance_history.json"
-SIGNAL_HISTORY_FILE = "signal_history.json"
-TOP_RANK_COUNT = 5  # Number of top opportunities to track for adaptation
+PERFORMANCE_HISTORY_FILE = "sig_data/signal_performance_history.json"
+SIGNAL_HISTORY_FILE = "sig_data/signal_history.json"
+TOP_RANK_COUNT = 5  # Number of top opportunities to track for adaptation (Tier 1)
+TIER_2_RANK_MAX = 10  # Maximum rank for Tier 2
+TIER_3_RANK_MAX = 20  # Maximum rank for Tier 3
+
+# Start date for performance tracking - can be adjusted manually
+PERFORMANCE_TRACKING_START_DATE = datetime.utcnow().isoformat()
 
 def preprocess_data(data):
     """
@@ -523,13 +528,13 @@ def update_signal_results(current_data):
         current_data (DataFrame): Current market data
         
     Returns:
-        tuple: (updated_signals, performance_metrics, top_performance_metrics)
+        tuple: (updated_signals, all_metrics, tier1_metrics, tier2_metrics, tier3_metrics)
     """
     # Load existing signals
     history = load_signal_history()
     
     if "signals" not in history or not history["signals"]:
-        return [], {}, {}
+        return [], {}, {}, {}, {}
     
     # Create latest price lookup
     latest_prices = {}
@@ -541,8 +546,18 @@ def update_signal_results(current_data):
                 'timestamp': latest_row['ticker_time']
             }
     
-    # Initialize metrics
+    # Load existing performance metrics file if it exists
+    existing_metrics = {}
+    if os.path.exists(PERFORMANCE_HISTORY_FILE):
+        try:
+            with open(PERFORMANCE_HISTORY_FILE, 'r') as f:
+                existing_metrics = json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading existing performance metrics: {e}")
+    
+    # Initialize metrics with start dates from existing metrics if available
     metrics = {
+        "start_date": existing_metrics.get("all_signals", {}).get("start_date", PERFORMANCE_TRACKING_START_DATE),
         "total_signals": 0,
         "active_signals": 0,
         "successful_signals": 0,
@@ -554,10 +569,49 @@ def update_signal_results(current_data):
         "win_rate": 0
     }
     
-    # Separate metrics for top-ranked signals only
-    top_metrics = metrics.copy()
+    # Separate metrics for tier 1 (top 5) signals
+    tier1_metrics = {
+        "start_date": existing_metrics.get("tier1_signals", {}).get("start_date", PERFORMANCE_TRACKING_START_DATE),
+        "total_signals": 0,
+        "active_signals": 0,
+        "successful_signals": 0,
+        "failed_signals": 0,
+        "total_profit_pct": 0,
+        "avg_profit_pct": 0,
+        "avg_win_pct": 0,
+        "avg_loss_pct": 0,
+        "win_rate": 0
+    }
     
-    # Check each active signal
+    # Separate metrics for tier 2 (ranks 6-10) signals
+    tier2_metrics = {
+        "start_date": existing_metrics.get("tier2_signals", {}).get("start_date", PERFORMANCE_TRACKING_START_DATE),
+        "total_signals": 0,
+        "active_signals": 0,
+        "successful_signals": 0,
+        "failed_signals": 0,
+        "total_profit_pct": 0,
+        "avg_profit_pct": 0,
+        "avg_win_pct": 0,
+        "avg_loss_pct": 0,
+        "win_rate": 0
+    }
+    
+    # Separate metrics for tier 3 (ranks 11-20) signals
+    tier3_metrics = {
+        "start_date": existing_metrics.get("tier3_signals", {}).get("start_date", PERFORMANCE_TRACKING_START_DATE),
+        "total_signals": 0,
+        "active_signals": 0,
+        "successful_signals": 0,
+        "failed_signals": 0,
+        "total_profit_pct": 0,
+        "avg_profit_pct": 0,
+        "avg_win_pct": 0,
+        "avg_loss_pct": 0,
+        "win_rate": 0
+    }
+    
+    # First update any active signals
     updated_signals = []
     for i, signal in enumerate(history["signals"]):
         if signal["status"] == "active" and signal["symbol"] in latest_prices:
@@ -581,35 +635,99 @@ def update_signal_results(current_data):
                 signal["profit_pct"] = ((signal["stop_loss"] / signal["entry_price"]) - 1) * 100
             
             history["signals"][i] = signal
-            
-        # Collect metrics for all signals
+    
+    # Save updated signal statuses
+    save_signal_history(history)
+    
+    # Now tally up the metrics from the entire history
+    all_wins = []
+    all_losses = []
+    tier1_wins = []
+    tier1_losses = []
+    tier2_wins = []
+    tier2_losses = []
+    tier3_wins = []
+    tier3_losses = []
+    
+    # Process all signals to build metrics
+    for signal in history["signals"]:
+        rank_num = signal.get("rank", 0)
+        is_tier1 = rank_num <= TOP_RANK_COUNT
+        is_tier2 = TOP_RANK_COUNT < rank_num <= TIER_2_RANK_MAX
+        is_tier3 = TIER_2_RANK_MAX < rank_num <= TIER_3_RANK_MAX
+        
+        # Always count in all_signals
         metrics["total_signals"] += 1
         
         if signal["status"] == "active":
             metrics["active_signals"] += 1
         elif signal["status"] == "closed":
+            profit_pct = signal.get("profit_pct", 0)
+            
             if signal["result"] == "take_profit":
                 metrics["successful_signals"] += 1
-                metrics["total_profit_pct"] += signal["profit_pct"]
-            else:
+                metrics["total_profit_pct"] += profit_pct
+                all_wins.append(profit_pct)
+            else:  # stop loss
                 metrics["failed_signals"] += 1
-                metrics["total_profit_pct"] += signal["profit_pct"]
-                
-        # Also collect metrics for top-ranked signals only
-        if "rank" in signal and signal["rank"] <= TOP_RANK_COUNT:
-            top_metrics["total_signals"] += 1
+                metrics["total_profit_pct"] += profit_pct
+                all_losses.append(profit_pct)
+        
+        # Count in tier1 if applicable
+        if is_tier1:
+            tier1_metrics["total_signals"] += 1
             
             if signal["status"] == "active":
-                top_metrics["active_signals"] += 1
+                tier1_metrics["active_signals"] += 1
             elif signal["status"] == "closed":
+                profit_pct = signal.get("profit_pct", 0)
+                
                 if signal["result"] == "take_profit":
-                    top_metrics["successful_signals"] += 1
-                    top_metrics["total_profit_pct"] += signal["profit_pct"]
-                else:
-                    top_metrics["failed_signals"] += 1
-                    top_metrics["total_profit_pct"] += signal["profit_pct"]
+                    tier1_metrics["successful_signals"] += 1
+                    tier1_metrics["total_profit_pct"] += profit_pct
+                    tier1_wins.append(profit_pct)
+                else:  # stop loss
+                    tier1_metrics["failed_signals"] += 1
+                    tier1_metrics["total_profit_pct"] += profit_pct
+                    tier1_losses.append(profit_pct)
         
-        # If closed recently (last 7 days), add to updated signals list
+        # Count in tier2 if applicable
+        elif is_tier2:  # IMPORTANT: changed from 'if' to 'elif' to avoid double counting
+            tier2_metrics["total_signals"] += 1
+            
+            if signal["status"] == "active":
+                tier2_metrics["active_signals"] += 1
+            elif signal["status"] == "closed":
+                profit_pct = signal.get("profit_pct", 0)
+                
+                if signal["result"] == "take_profit":
+                    tier2_metrics["successful_signals"] += 1
+                    tier2_metrics["total_profit_pct"] += profit_pct
+                    tier2_wins.append(profit_pct)
+                else:  # stop loss
+                    tier2_metrics["failed_signals"] += 1
+                    tier2_metrics["total_profit_pct"] += profit_pct
+                    tier2_losses.append(profit_pct)
+                    
+        # Count in tier3 if applicable
+        elif is_tier3:  # Using elif to avoid double counting
+            tier3_metrics["total_signals"] += 1
+            
+            if signal["status"] == "active":
+                tier3_metrics["active_signals"] += 1
+            elif signal["status"] == "closed":
+                profit_pct = signal.get("profit_pct", 0)
+                
+                if signal["result"] == "take_profit":
+                    tier3_metrics["successful_signals"] += 1
+                    tier3_metrics["total_profit_pct"] += profit_pct
+                    tier3_wins.append(profit_pct)
+                else:  # stop loss
+                    tier3_metrics["failed_signals"] += 1
+                    tier3_metrics["total_profit_pct"] += profit_pct
+                    tier3_losses.append(profit_pct)
+        
+        # Add recently closed signals to the returned list
         if signal["status"] == "closed" and "exit_time" in signal and signal["exit_time"]:
             try:
                 exit_time = pd.to_datetime(signal["exit_time"])
@@ -623,40 +741,39 @@ def update_signal_results(current_data):
     if closed_signals > 0:
         metrics["avg_profit_pct"] = metrics["total_profit_pct"] / closed_signals
         metrics["win_rate"] = (metrics["successful_signals"] / closed_signals) * 100
-        
-        # Calculate average win/loss
-        wins = [s["profit_pct"] for s in history["signals"] 
-                if s["status"] == "closed" and s["result"] == "take_profit"]
-        losses = [s["profit_pct"] for s in history["signals"] 
-                 if s["status"] == "closed" and s["result"] == "stop_loss"]
-        
-        metrics["avg_win_pct"] = sum(wins) / len(wins) if wins else 0
-        metrics["avg_loss_pct"] = sum(losses) / len(losses) if losses else 0
+        metrics["avg_win_pct"] = sum(all_wins) / len(all_wins) if all_wins else 0
+        metrics["avg_loss_pct"] = sum(all_losses) / len(all_losses) if all_losses else 0
     
-    # Calculate aggregate metrics for top-ranked signals
-    closed_top_signals = top_metrics["successful_signals"] + top_metrics["failed_signals"]
-    if closed_top_signals > 0:
-        top_metrics["avg_profit_pct"] = top_metrics["total_profit_pct"] / closed_top_signals
-        top_metrics["win_rate"] = (top_metrics["successful_signals"] / closed_top_signals) * 100
-        
-        # Calculate average win/loss for top signals
-        top_wins = [s["profit_pct"] for s in history["signals"] 
-                   if s["status"] == "closed" and s["result"] == "take_profit" 
-                   and "rank" in s and s["rank"] <= TOP_RANK_COUNT]
-        top_losses = [s["profit_pct"] for s in history["signals"] 
-                     if s["status"] == "closed" and s["result"] == "stop_loss"
-                     and "rank" in s and s["rank"] <= TOP_RANK_COUNT]
-        
-        top_metrics["avg_win_pct"] = sum(top_wins) / len(top_wins) if top_wins else 0
-        top_metrics["avg_loss_pct"] = sum(top_losses) / len(top_losses) if top_losses else 0
+    # Calculate aggregate metrics for tier 1 signals
+    closed_tier1_signals = tier1_metrics["successful_signals"] + tier1_metrics["failed_signals"]
+    if closed_tier1_signals > 0:
+        tier1_metrics["avg_profit_pct"] = tier1_metrics["total_profit_pct"] / closed_tier1_signals
+        tier1_metrics["win_rate"] = (tier1_metrics["successful_signals"] / closed_tier1_signals) * 100
+        tier1_metrics["avg_win_pct"] = sum(tier1_wins) / len(tier1_wins) if tier1_wins else 0
+        tier1_metrics["avg_loss_pct"] = sum(tier1_losses) / len(tier1_losses) if tier1_losses else 0
     
-    # Save updated history
-    save_signal_history(history)
+    # Calculate aggregate metrics for tier 2 signals
+    closed_tier2_signals = tier2_metrics["successful_signals"] + tier2_metrics["failed_signals"]
+    if closed_tier2_signals > 0:
+        tier2_metrics["avg_profit_pct"] = tier2_metrics["total_profit_pct"] / closed_tier2_signals
+        tier2_metrics["win_rate"] = (tier2_metrics["successful_signals"] / closed_tier2_signals) * 100
+        tier2_metrics["avg_win_pct"] = sum(tier2_wins) / len(tier2_wins) if tier2_wins else 0
+        tier2_metrics["avg_loss_pct"] = sum(tier2_losses) / len(tier2_losses) if tier2_losses else 0
+        
+    # Calculate aggregate metrics for tier 3 signals
+    closed_tier3_signals = tier3_metrics["successful_signals"] + tier3_metrics["failed_signals"]
+    if closed_tier3_signals > 0:
+        tier3_metrics["avg_profit_pct"] = tier3_metrics["total_profit_pct"] / closed_tier3_signals
+        tier3_metrics["win_rate"] = (tier3_metrics["successful_signals"] / closed_tier3_signals) * 100
+        tier3_metrics["avg_win_pct"] = sum(tier3_wins) / len(tier3_wins) if tier3_wins else 0
+        tier3_metrics["avg_loss_pct"] = sum(tier3_losses) / len(tier3_losses) if tier3_losses else 0
     
-    # Save performance metrics separately for easy access
+    # Save performance metrics with tiers
     metrics_data = {
         "all_signals": metrics,
-        "top_signals": top_metrics
+        "tier1_signals": tier1_metrics,
+        "tier2_signals": tier2_metrics,
+        "tier3_signals": tier3_metrics
     }
     
     try:
@@ -665,14 +782,14 @@ def update_signal_results(current_data):
     except Exception as e:
         logger.error(f"Error saving performance metrics: {e}")
     
-    return updated_signals, metrics, top_metrics
+    return updated_signals, metrics, tier1_metrics, tier2_metrics, tier3_metrics
 
 def adaptive_parameters(performance_metrics):
     """
-    Adapt parameters based on top-ranked signal performance metrics
+    Adapt parameters based on tier 1 signal performance metrics
     
     Args:
-        performance_metrics (dict): Performance metrics dictionary containing both all_signals and top_signals
+        performance_metrics (dict): Performance metrics dictionary containing signals data
         
     Returns:
         dict: Updated parameters
@@ -684,14 +801,14 @@ def adaptive_parameters(performance_metrics):
         "take_profit_pct": DEFAULT_TAKE_PROFIT_PCT
     }
     
-    # Check if we have top signal metrics
-    top_metrics = performance_metrics.get("top_signals", {})
+    # Check if we have tier 1 signal metrics
+    tier1_metrics = performance_metrics.get("tier1_signals", {})
     
-    # If we have enough closed top-ranked signals to make decisions
-    if top_metrics.get("total_signals", 0) >= 5 and top_metrics.get("successful_signals", 0) + top_metrics.get("failed_signals", 0) >= 3:
-        logger.info("Adapting parameters based on top-ranked signal performance")
-        win_rate = top_metrics.get("win_rate", 50)
-        avg_profit = top_metrics.get("avg_profit_pct", 0)
+    # If we have enough closed tier 1 signals to make decisions
+    if tier1_metrics.get("total_signals", 0) >= 5 and tier1_metrics.get("successful_signals", 0) + tier1_metrics.get("failed_signals", 0) >= 3:
+        logger.info("Adapting parameters based on tier 1 signal performance")
+        win_rate = tier1_metrics.get("win_rate", 50)
+        avg_profit = tier1_metrics.get("avg_profit_pct", 0)
         
         # Adjust signal threshold based on win rate
         if win_rate < 40:
@@ -715,7 +832,7 @@ def adaptive_parameters(performance_metrics):
             params["take_profit_pct"] = new_tp
             logger.info(f"High average profit ({avg_profit:.2f}%), decreasing take_profit_pct to {new_tp:.2f}%")
     else:
-        logger.info("Insufficient top-ranked signal history for parameter adaptation")
+        logger.info("Insufficient tier 1 signal history for parameter adaptation")
     
     return params
 
@@ -736,6 +853,27 @@ def rank_opportunities(signals_df, min_score=60, min_volume_usd=50000):
     # Get the latest data point for each symbol
     latest_data = signals_df.sort_values('ticker_time').groupby('symbol').tail(1).copy()
     logger.info(f"Found {len(latest_data)} unique symbols in latest data")
+    
+    # Ensure datetime format for analysis and logging
+    if 'ticker_time' in latest_data.columns:
+        latest_data['ticker_time'] = pd.to_datetime(latest_data['ticker_time'], format='mixed', errors='coerce')
+        
+        # Report on freshness of data
+        now = datetime.utcnow()
+        latest_data['minutes_old'] = (now - latest_data['ticker_time']).dt.total_seconds() / 60
+        
+        # Log data freshness statistics
+        very_fresh = len(latest_data[latest_data['minutes_old'] < 5])
+        fresh = len(latest_data[latest_data['minutes_old'] < 10])
+        stale = len(latest_data[latest_data['minutes_old'] >= 10])
+        
+        logger.info(f"Data freshness: {very_fresh} symbols <5min old, {fresh-very_fresh} symbols 5-10min old, {stale} symbols >10min old")
+        
+        # Report on the stalest symbols
+        if stale > 0:
+            stalest = latest_data.nlargest(min(5, stale), 'minutes_old')
+            for _, row in stalest.iterrows():
+                logger.info(f"Stale data: {row['symbol']} is {row['minutes_old']:.1f} minutes old from {row['ticker_time']}")
     
     # Show distribution of scores
     score_ranges = {
@@ -775,51 +913,55 @@ def rank_opportunities(signals_df, min_score=60, min_volume_usd=50000):
     peak_filter = latest_data['high_proximity'] < 0.98 if 'high_proximity' in latest_data.columns else pd.Series(True, index=latest_data.index)
     logger.info(f"Coins passing peak filter (<98% of recent high): {peak_filter.sum()}")
     
+    # Filter for data freshness - only use data from last 10 minutes
+    freshness_filter = latest_data['minutes_old'] < 10 if 'minutes_old' in latest_data.columns else pd.Series(True, index=latest_data.index) 
+    logger.info(f"Coins passing freshness filter (<10min old): {freshness_filter.sum()}")
+    
     # Filter by minimum score and volume
     score_filter = latest_data['combined_score'] >= min_score
     volume_filter = latest_data['usd_vol5m'] >= min_volume_usd
     
     logger.info(f"Coins passing score filter ({min_score}+): {score_filter.sum()}")
     logger.info(f"Coins passing volume filter (${min_volume_usd}+): {volume_filter.sum()}")
-    logger.info(f"Coins passing all filters: {(score_filter & volume_filter & peak_filter).sum()}")
+    logger.info(f"Coins passing all filters: {(score_filter & volume_filter & peak_filter & freshness_filter).sum()}")
     
     # IMPORTANT: First try our best filtering
-    filtered_data = latest_data[score_filter & volume_filter & peak_filter].copy()
+    filtered_data = latest_data[score_filter & volume_filter & peak_filter & freshness_filter].copy()
     
-    # If we have at least 5 opportunities with optimal filtering, use those
-    if len(filtered_data) >= 5:
+    # If we have at least 20 opportunities with optimal filtering, use those
+    if len(filtered_data) >= TIER_3_RANK_MAX:
         logger.info("Found sufficient opportunities with optimal filtering")
         opportunities = filtered_data
     else:
         # Try with relaxed score threshold
-        logger.info("Optimal filtering produced fewer than 5 results, relaxing score filter")
+        logger.info(f"Optimal filtering produced fewer than {TIER_3_RANK_MAX} results, relaxing score filter")
         relaxed_score_filter = latest_data['combined_score'] >= 40  # Relaxed score threshold
-        relaxed_filtered_data = latest_data[relaxed_score_filter & volume_filter & peak_filter].copy()
+        relaxed_filtered_data = latest_data[relaxed_score_filter & volume_filter & peak_filter & freshness_filter].copy()
         
-        if len(relaxed_filtered_data) >= 5:
+        if len(relaxed_filtered_data) >= TIER_3_RANK_MAX:
             logger.info("Found sufficient opportunities with relaxed score filtering")
             opportunities = relaxed_filtered_data
         else:
             # Try with relaxed volume threshold
-            logger.info("Relaxed score filtering produced fewer than 5 results, relaxing volume filter")
+            logger.info(f"Relaxed score filtering produced fewer than {TIER_3_RANK_MAX} results, relaxing volume filter")
             relaxed_volume_filter = latest_data['usd_vol5m'] >= 10000  # Relaxed volume threshold
-            more_relaxed_data = latest_data[relaxed_score_filter & relaxed_volume_filter & peak_filter].copy()
+            more_relaxed_data = latest_data[relaxed_score_filter & relaxed_volume_filter & peak_filter & freshness_filter].copy()
             
-            if len(more_relaxed_data) >= 5:
+            if len(more_relaxed_data) >= TIER_3_RANK_MAX:
                 logger.info("Found sufficient opportunities with relaxed score and volume filtering")
                 opportunities = more_relaxed_data
             else:
                 # Try with just the peak filter
-                logger.info("Relaxed filtering still produced fewer than 5 results, using only peak filter")
-                peak_filtered_data = latest_data[peak_filter].copy()
+                logger.info(f"Relaxed filtering still produced fewer than {TIER_3_RANK_MAX} results, using only peak filter")
+                peak_filtered_data = latest_data[peak_filter & freshness_filter].copy()
                 
-                if len(peak_filtered_data) >= 5:
+                if len(peak_filtered_data) >= TIER_3_RANK_MAX:
                     logger.info("Found sufficient opportunities with peak filter only")
                     opportunities = peak_filtered_data
                 else:
                     # As a last resort, just take all data
-                    logger.info("Using all available data to get top 5 opportunities")
-                    opportunities = latest_data.copy()
+                    logger.info(f"Using all available data to get top {TIER_3_RANK_MAX} opportunities")
+                    opportunities = latest_data[freshness_filter].copy()
     
     # Create a total opportunity score that considers both signal strength and liquidity
     opportunities['liquidity_factor'] = np.tanh(opportunities['usd_vol5m'] / 1000000)
@@ -832,8 +974,9 @@ def rank_opportunities(signals_df, min_score=60, min_volume_usd=50000):
     else:
         opportunities['opportunity_score'] = opportunities['combined_score'] * (0.7 + 0.3 * opportunities['liquidity_factor'])
     
-    # Rank opportunities and ensure we get at least top 5
-    ranked = opportunities.nlargest(min(len(opportunities), 5), 'opportunity_score').reset_index(drop=True)
+    # Rank opportunities and ensure we get at least top 20 (Tier 1, 2, and 3)
+    n_opportunities = min(len(opportunities), TIER_3_RANK_MAX)
+    ranked = opportunities.nlargest(n_opportunities, 'opportunity_score').reset_index(drop=True)
     
     # Add rank column
     ranked['rank'] = ranked.index + 1
@@ -886,7 +1029,7 @@ def generate_signals(data):
     
     return df
 
-def run_signal_analysis(merged_data_path="all_cryptos_merged.csv"):
+def run_signal_analysis(merged_data_path="sig_data/all_cryptos_merged.csv"):
     """
     Run complete signal analysis on merged cryptocurrency data
     
@@ -910,10 +1053,10 @@ def run_signal_analysis(merged_data_path="all_cryptos_merged.csv"):
     
     # Update results for existing signals
     logger.info("Updating signal performance tracking")
-    updated_signals, all_metrics, top_metrics = update_signal_results(signals_df)
+    updated_signals, all_metrics, tier1_metrics, tier2_metrics, tier3_metrics = update_signal_results(signals_df)
     
-    # Get adaptive parameters based on past performance of TOP signals only
-    metrics_for_adaptation = {"top_signals": top_metrics}
+    # Get adaptive parameters based on past performance of tier 1 signals
+    metrics_for_adaptation = {"tier1_signals": tier1_metrics}
     params = adaptive_parameters(metrics_for_adaptation)
     logger.info(f"Using adaptive parameters: {params}")
     
@@ -925,8 +1068,10 @@ def run_signal_analysis(merged_data_path="all_cryptos_merged.csv"):
         min_volume_usd=50000
     )
     
-    # Track new signals for top opportunities
+    # Track new signals
     current_time = datetime.utcnow().isoformat()
+    
+    # Track tier 1 signals (top 5)
     for i, row in ranked.head(TOP_RANK_COUNT).iterrows():
         track_signal(
             row['symbol'], 
@@ -934,23 +1079,53 @@ def run_signal_analysis(merged_data_path="all_cryptos_merged.csv"):
             row['stop_loss_price'],
             row['take_profit_price'],
             row['combined_score'],
-            row['rank'],
+            row['rank'],  # Ranks 1-5 = Tier 1
             current_time
         )
     
+    # Track tier 2 signals (ranks 6-10)
+    if len(ranked) > TOP_RANK_COUNT:
+        tier2_end = min(TIER_2_RANK_MAX, len(ranked))
+        for i, row in ranked.iloc[TOP_RANK_COUNT:tier2_end].iterrows():
+            track_signal(
+                row['symbol'], 
+                row['entry_price'], 
+                row['stop_loss_price'],
+                row['take_profit_price'],
+                row['combined_score'],
+                row['rank'],  # Ranks 6-10 = Tier 2
+                current_time
+            )
+    
+    # Track tier 3 signals (ranks 11-20)
+    if len(ranked) > TIER_2_RANK_MAX:
+        tier3_end = min(TIER_3_RANK_MAX, len(ranked))
+        for i, row in ranked.iloc[TIER_2_RANK_MAX:tier3_end].iterrows():
+            track_signal(
+                row['symbol'], 
+                row['entry_price'], 
+                row['stop_loss_price'],
+                row['take_profit_price'],
+                row['combined_score'],
+                row['rank'],  # Ranks 11-20 = Tier 3
+                current_time
+            )
+    
     # Save signals to file
-    signals_file = "crypto_signals.csv"
+    signals_file = "sig_data/crypto_signals.csv"
     signals_df.to_csv(signals_file, index=False)
     logger.info(f"Saved signals to {signals_file}")
     
-    ranked_file = "ranked_opportunities.csv"
+    ranked_file = "sig_data/ranked_opportunities.csv"
     ranked.to_csv(ranked_file, index=False)
     logger.info(f"Saved ranked opportunities to {ranked_file}")
     
-    # Combine metrics for return
+    # Combine metrics for return - include all tiers
     performance_metrics = {
         "all_signals": all_metrics,
-        "top_signals": top_metrics
+        "tier1_signals": tier1_metrics,
+        "tier2_signals": tier2_metrics,
+        "tier3_signals": tier3_metrics
     }
     
     return signals_df, ranked, performance_metrics
